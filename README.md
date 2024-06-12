@@ -2,7 +2,7 @@
 
 This is a switch implemented by dpdk, using the run-to-completion model.
 
-## Envirironment
+## Environment
 
 - DPDK 23.07
 
