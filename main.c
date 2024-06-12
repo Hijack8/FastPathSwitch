@@ -22,6 +22,8 @@
 #include <rte_malloc.h>
 #include <rte_prefetch.h>
 #include <rte_ethdev.h>
+#include <rte_hash.h>
+#include <rte_hash_crc.h>
 
 #define APP_MAX_LCORES 16
 #define APP_MAX_PORTS 16
@@ -39,17 +41,19 @@ struct lcore_queue_conf
 };
 struct lcore_queue_conf lcore_queue_conf[RTE_MAX_LCORE];
 
+#define MAC_TABLE_SIZE 10
+
 struct Switch
 {
 	int n_lcores;
 	int lcores[APP_MAX_LCORES];
-	int promiscuous_on;
 	struct rte_mempool *pool;
-
 	int port_mask;
-	int n_queues;
 	int n_ports;
 	int ports[APP_MAX_PORTS];
+
+	int mac_table[MAC_TABLE_SIZE];
+	struct rte_hash *hash;
 } app;
 
 static struct rte_eth_conf port_conf = {
@@ -141,6 +145,19 @@ app_init_port()
 	}
 }
 
+void app_init_hash()
+{
+	char name[10] = "hash_name";
+	struct rte_hash_parameters hash_params = {
+		.name = name,
+		.entries = MAC_TABLE_SIZE,
+		.key_len = sizeof(struct rte_ether_addr),
+		.hash_func = rte_hash_crc,
+		.hash_func_init_val = 0,
+	};
+	app.hash = rte_hash_create(&hash_params);
+}
+
 void app_init()
 {
 	// init mempool
@@ -153,6 +170,7 @@ void app_init()
 
 	app_init_lcores();
 	app_init_port();
+	app_init_hash();
 }
 
 /* Launch a function on lcore. 8< */
@@ -222,14 +240,38 @@ static int app_launch_one_lcore(__rte_unused void *dummy)
 	app_main_loop();
 	return 0;
 }
+int app_l2_lookup(const struct rte_ether_addr *addr)
+{
+	int index = rte_hash_lookup(app.hash, addr);
+	if (index >= 0 && index < MAC_TABLE_SIZE)
+	{
+		return app.mac_table[index];
+	}
+	return -1;
+}
 
 void l2_learning(struct rte_mbuf *m, int src_port)
 {
+	struct rte_ether_hdr *eth;
+	eth = rte_pktmbuf_mtod(m, struct rte_ether_hdr *);
+	struct rte_ether_addr *addr;
+	addr = &eth->src_addr;
+	if (app_l2_lookup(addr) >= 0)
+		return;
+	int index = rte_hash_add_key(app.hash, addr);
+	printf("learning ... port_id = %u\n", src_port);
+	if (index < 0)
+		rte_panic("l2_hash add key error \n");
+	app.mac_table[index] = src_port;
 }
 
 int get_dest_port(struct rte_mbuf *m, int src_port)
 {
-	return src_port ^ 1;
+	struct rte_ether_hdr *eth;
+	eth = rte_pktmbuf_mtod(m, struct rte_ether_hdr *);
+	struct rte_ether_addr *dst_addr;
+	dst_addr = &eth->dst_addr;
+	return app_l2_lookup(dst_addr);
 }
 
 #define BURST_SIZE 32
