@@ -58,20 +58,100 @@ static struct rte_eth_conf port_conf = {
 	},
 };
 
+int init_lcore_rx_queues()
+{
+	uint16_t i, n_rx_queues;
+	uint8_t lcore;
+	for (i = 0; i < APP_MAX_LCORES; i++)
+	{
+	}
+}
+
+static int app_init_lcores()
+{
+	int n_lcore = 0;
+	for (int i = 0; i < APP_MAX_LCORES; i++)
+	{
+		if (!rte_lcore_is_enabled(i))
+			continue;
+		app.lcores[n_lcore++] = i;
+	}
+	app.n_lcores = n_lcore;
+}
+
 static int
 app_init_port()
 {
+	int port_id;
+	int ret;
+	for (port_id = 0; port_id < APP_MAX_PORTS; port_id++)
+	{
+		if ((app.port_mask & (1 << port_id)) == 0)
+			continue;
+		app.ports[app.n_ports++] = port_id;
+	}
+
+	printf("n_ports = %d \n", app.n_ports);
+	printf("n_lcores = %d \n", app.n_lcores);
+
+	if (app.n_ports > app.n_lcores)
+		rte_exit(EXIT_FAILURE, "n_ports > n_lcores \n");
+
+	if (ret < 0)
+		rte_exit(EXIT_FAILURE, "init_lcore_rx_queues failed\n");
+	int n_tx_queue = app.n_ports;
+	struct rte_eth_conf local_port_conf = port_conf;
+	struct rte_eth_dev_info dev_info;
+	for (int i = 0; i < app.n_ports; i++)
+	{
+		struct rte_eth_rxconf rxq_conf;
+		struct rte_eth_txconf txq_conf;
+		port_id = app.ports[i];
+		ret = rte_eth_dev_configure(port_id, 1, n_tx_queue, &local_port_conf);
+		if (ret < 0)
+			rte_exit(EXIT_FAILURE, "Cannot configure device err = %d port = %d \n", ret, port_id);
+		ret = rte_eth_dev_adjust_nb_rx_tx_desc(port_id, &nb_rxd, &nb_txd);
+		if (ret < 0)
+			rte_exit(EXIT_FAILURE, "Cannot adjust number of descriptors err = %d port = %d \n", ret, port_id);
+
+		ret = rte_eth_dev_info_get(port_id, &dev_info);
+		if (ret != 0)
+			rte_exit(EXIT_FAILURE, "Error during getting device info\n");
+
+		rxq_conf = dev_info.default_rxconf;
+		txq_conf = dev_info.default_txconf;
+		ret = rte_eth_rx_queue_setup(port_id, 0, nb_rxd, rte_socket_id(), &rxq_conf, app.pool);
+		if (ret != 0)
+			rte_exit(EXIT_FAILURE, "Error rx queue setup \n");
+
+		for (int queue_id = 0; queue_id < n_tx_queue; queue_id++)
+		{
+			ret = rte_eth_tx_queue_setup(port_id, queue_id, nb_txd, rte_socket_id(), &txq_conf);
+			if (ret != 0)
+				rte_exit(EXIT_FAILURE, "Error tx queue setup \n");
+		}
+	}
+
+	for (int i = 0; i < app.n_ports; i++)
+	{
+		port_id = app.ports[i];
+		ret = rte_eth_dev_start(port_id);
+		if (ret < 0)
+			rte_exit(EXIT_FAILURE, "rte_eth_dev_start \n");
+	}
 }
 
 void app_init()
 {
 	// init mempool
-	app.pool = rte_mempool_create_empty("switch pool", (1 << 15) - 1, 64, 0, 0, rte_socket_id(), 0);
+	// TODO
+	app.pool = rte_pktmbuf_pool_create("switch_pool", (1 << 15) - 1, 256, 0, RTE_MBUF_DEFAULT_BUF_SIZE, rte_socket_id());
 	if (app.pool == NULL)
 	{
 		rte_panic("alloc mempool failed");
 	}
 
+	app_init_lcores();
 	app_init_port();
 }
 
@@ -143,6 +223,66 @@ static int app_launch_one_lcore(__rte_unused void *dummy)
 	return 0;
 }
 
+void l2_learning(struct rte_mbuf *m, int src_port)
+{
+}
+
+int get_dest_port(struct rte_mbuf *m, int src_port)
+{
+	return src_port ^ 1;
+}
+
+#define BURST_SIZE 32
+
+void app_main_loop()
+{
+	uint32_t lcore_id = rte_lcore_id();
+	printf("lcore %u is forwarding \n", lcore_id);
+
+	int port = app.ports[lcore_id];
+
+	struct rte_mbuf *bufs[BURST_SIZE];
+	struct rte_mbuf *tx_bufs[APP_MAX_PORTS][BURST_SIZE];
+	int n_tx_bufs[APP_MAX_PORTS] = {0};
+	while (1)
+	{
+		int nb_rx = rte_eth_rx_burst(port, 0, bufs, BURST_SIZE);
+
+		if (nb_rx == 0)
+			continue;
+
+		for (int i = 0; i < nb_rx; i++)
+		{
+			l2_learning(bufs[i], port);
+			int dst_port = get_dest_port(bufs[i], port);
+			tx_bufs[dst_port][n_tx_bufs[dst_port]++] = bufs[i];
+		}
+		for (int i = 0; i < app.n_ports; i++)
+		{
+			if (n_tx_bufs[i] == 0)
+				continue;
+			int nb_tx = rte_eth_tx_burst(i, lcore_id, tx_bufs[i], n_tx_bufs[i]);
+			if (unlikely(nb_tx < n_tx_bufs[i]))
+			{
+				for (int j = nb_tx; j < n_tx_bufs[i]; j++)
+					rte_pktmbuf_free(tx_bufs[i][j]);
+			}
+		}
+	}
+}
+
+void app_finish()
+{
+	int ret;
+	for (int i = 0; i < app.n_ports; i++)
+	{
+		int port_id = app.ports[i];
+		ret = rte_eth_dev_stop(port_id);
+		if (ret != 0)
+			printf("rte_eth_dev_stop err \n");
+	}
+}
+
 /* Initialization of Environment Abstraction Layer (EAL). 8< */
 int main(int argc, char **argv)
 {
@@ -164,16 +304,9 @@ int main(int argc, char **argv)
 	app_init();
 
 	/* Launches the function on each lcore. 8< */
-	RTE_LCORE_FOREACH_WORKER(lcore_id)
-	{
-		/* Simpler equivalent. 8< */
-		rte_eal_remote_launch(lcore_hello, NULL, lcore_id);
-		/* >8 End of simpler equivalent. */
-	}
+	rte_eal_mp_remote_launch(app_main_loop, NULL, CALL_MAIN);
 
-	/* call it on main lcore too */
-	lcore_hello(NULL);
-	/* >8 End of launching the function on each lcore. */
+	app_finish();
 
 	rte_eal_mp_wait_lcore();
 
