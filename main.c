@@ -235,11 +235,6 @@ int app_parse_args(int argc, char **argv)
 	return ret;
 }
 
-static int app_launch_one_lcore(__rte_unused void *dummy)
-{
-	app_main_loop();
-	return 0;
-}
 int app_l2_lookup(const struct rte_ether_addr *addr)
 {
 	int index = rte_hash_lookup(app.hash, addr);
@@ -276,7 +271,7 @@ int get_dest_port(struct rte_mbuf *m, int src_port)
 
 #define BURST_SIZE 32
 
-void app_main_loop()
+int app_main_loop(void *)
 {
 	uint32_t lcore_id = rte_lcore_id();
 	printf("lcore %u is forwarding \n", lcore_id);
@@ -311,6 +306,7 @@ void app_main_loop()
 			}
 		}
 	}
+	return 0;
 }
 
 void app_finish()
