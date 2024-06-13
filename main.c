@@ -41,7 +41,7 @@ struct lcore_queue_conf
 };
 struct lcore_queue_conf lcore_queue_conf[RTE_MAX_LCORE];
 
-#define MAC_TABLE_SIZE 10
+#define MAC_TABLE_SIZE 20
 
 struct Switch
 {
@@ -142,6 +142,7 @@ app_init_port()
 		ret = rte_eth_dev_start(port_id);
 		if (ret < 0)
 			rte_exit(EXIT_FAILURE, "rte_eth_dev_start \n");
+        rte_eth_promiscuous_enable(port_id);
 	}
 }
 
@@ -235,6 +236,12 @@ int app_parse_args(int argc, char **argv)
 	return ret;
 }
 
+void print_addr(struct rte_ether_addr *addr) {
+    printf("MAC Address : %02" PRIx8 ":%02" PRIx8 ":%02" PRIx8 ":%02" PRIx8 ":%02" PRIx8 ":%02" PRIx8 "\n",
+           addr->addr_bytes[0], addr->addr_bytes[1], addr->addr_bytes[2],
+           addr->addr_bytes[3], addr->addr_bytes[4], addr->addr_bytes[5]);
+}
+
 int app_l2_lookup(const struct rte_ether_addr *addr)
 {
 	int index = rte_hash_lookup(app.hash, addr);
@@ -245,6 +252,7 @@ int app_l2_lookup(const struct rte_ether_addr *addr)
 	return -1;
 }
 
+
 void l2_learning(struct rte_mbuf *m, int src_port)
 {
 	struct rte_ether_hdr *eth;
@@ -254,9 +262,10 @@ void l2_learning(struct rte_mbuf *m, int src_port)
 	if (app_l2_lookup(addr) >= 0)
 		return;
 	int index = rte_hash_add_key(app.hash, addr);
-	printf("learning ... port_id = %u\n", src_port);
+    printf("learning ... port_id = %u\n", src_port);
 	if (index < 0)
 		rte_panic("l2_hash add key error \n");
+    printf("index = %d \n", index);
 	app.mac_table[index] = src_port;
 }
 
@@ -283,7 +292,7 @@ int app_main_loop(void *)
 	int n_tx_bufs[APP_MAX_PORTS] = {0};
 	while (1)
 	{
-		int nb_rx = rte_eth_rx_burst(port, 0, bufs, BURST_SIZE);
+		int nb_rx = rte_eth_rx_burst(port, 0, bufs, 8);
 
 		if (nb_rx == 0)
 			continue;
@@ -292,7 +301,18 @@ int app_main_loop(void *)
 		{
 			l2_learning(bufs[i], port);
 			int dst_port = get_dest_port(bufs[i], port);
-			tx_bufs[dst_port][n_tx_bufs[dst_port]++] = bufs[i];
+            if(dst_port == -1) {
+                // broadcast 
+                for(int j = 0; j < app.n_ports; j ++) {
+                    if(j != (port ^ 1) && j != port)
+                    {
+			            tx_bufs[j][n_tx_bufs[j]++] = rte_pktmbuf_clone(bufs[i], app.pool);
+                    }
+                }
+			    tx_bufs[port ^ 1][n_tx_bufs[port ^ 1]++] = bufs[i];
+            }
+            else 
+			    tx_bufs[dst_port][n_tx_bufs[dst_port]++] = bufs[i];
 		}
 		for (int i = 0; i < app.n_ports; i++)
 		{
@@ -304,6 +324,7 @@ int app_main_loop(void *)
 				for (int j = nb_tx; j < n_tx_bufs[i]; j++)
 					rte_pktmbuf_free(tx_bufs[i][j]);
 			}
+            n_tx_bufs[i] = 0;
 		}
 	}
 	return 0;
