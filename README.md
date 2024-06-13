@@ -2,6 +2,14 @@
 
 This is a switch implemented by dpdk, using the run-to-completion model.
 
+## Features
+
+- RTC (run-to-completion) model
+
+- High performance
+
+- l2 self learning && l2 forwarding
+
 ## Environment
 
 - DPDK 23.07
