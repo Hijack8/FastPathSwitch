@@ -26,7 +26,7 @@
 #include <rte_hash_crc.h>
 #include <rte_spinlock.h>
 
-#define APP_MAX_LCORES 16
+#define APP_MAX_LCORES 32 
 #define APP_MAX_PORTS 16
 
 // configurable number of RX/TX ring descriptors
@@ -35,12 +35,11 @@
 static uint16_t nb_rxd = RX_DESC_DEFAULT;
 static uint16_t nb_txd = TX_DESC_DEFAULT;
 
-struct lcore_queue_conf
+struct lcore_conf
 {
 	unsigned n_ports;
 	unsigned rx_port_list[APP_MAX_PORTS];
 };
-struct lcore_queue_conf lcore_queue_conf[RTE_MAX_LCORE];
 
 #define MAC_TABLE_SIZE 20
 
@@ -56,6 +55,7 @@ struct Switch
 	int mac_table[MAC_TABLE_SIZE];
 	struct rte_hash *hash;
     rte_spinlock_t lock;
+    struct lcore_conf lcore_conf[RTE_MAX_LCORE];
 } app;
 
 static struct rte_eth_conf port_conf = {
@@ -68,8 +68,13 @@ int init_lcore_rx_queues()
 {
 	uint16_t i, n_rx_queues;
 	uint8_t lcore;
-	for (i = 0; i < APP_MAX_LCORES; i++)
+    if(app.n_lcores != app.n_ports) {
+        rte_panic("n_lcore != n_ports");
+    }
+	for (i = 0; i < app.n_lcores; i++)
 	{
+        int lcore_id = app.lcores[i];
+        app.lcore_conf[lcore_id].rx_port_list[app.lcore_conf[lcore_id].n_ports ++] = i;
 	}
 }
 
@@ -177,6 +182,7 @@ void app_init()
 
 	app_init_lcores();
 	app_init_port();
+    init_lcore_rx_queues();
 	app_init_hash();
     app_init_lock();
 }
@@ -292,9 +298,10 @@ int get_dest_port(struct rte_mbuf *m, int src_port)
 int app_main_loop(void *)
 {
 	uint32_t lcore_id = rte_lcore_id();
-	printf("lcore %u is forwarding \n", lcore_id);
+    struct lcore_conf *conf_ptr = &app.lcore_conf[lcore_id];
+	printf("Lcore %u is forwarding for port %d\n", lcore_id, conf_ptr -> rx_port_list[0]);
 
-	int port = app.ports[lcore_id];
+    int port = app.ports[conf_ptr -> rx_port_list[0]];
 
 	struct rte_mbuf *bufs[BURST_SIZE];
 	struct rte_mbuf *tx_bufs[APP_MAX_PORTS][BURST_SIZE];
@@ -327,7 +334,7 @@ int app_main_loop(void *)
 		{
 			if (n_tx_bufs[i] == 0)
 				continue;
-			int nb_tx = rte_eth_tx_burst(i, lcore_id, tx_bufs[i], n_tx_bufs[i]);
+			int nb_tx = rte_eth_tx_burst(app.ports[i], port, tx_bufs[i], n_tx_bufs[i]);
 			if (unlikely(nb_tx < n_tx_bufs[i]))
 			{
 				for (int j = nb_tx; j < n_tx_bufs[i]; j++)
