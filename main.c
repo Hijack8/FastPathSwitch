@@ -26,23 +26,24 @@
 #include <rte_hash_crc.h>
 #include <rte_spinlock.h>
 
-#define APP_MAX_LCORES 32 
+#define APP_MAX_LCORES 32
 #define APP_MAX_PORTS 16
-
-// configurable number of RX/TX ring descriptors
+/* Default number of descriptors for RX and TX */
 #define RX_DESC_DEFAULT 1024
 #define TX_DESC_DEFAULT 1024
 static uint16_t nb_rxd = RX_DESC_DEFAULT;
 static uint16_t nb_txd = TX_DESC_DEFAULT;
+/* MAC table size for hash */
+#define MAC_TABLE_SIZE 20
 
+/* Configuration rx_port for each lcore */
 struct lcore_conf
 {
 	unsigned n_ports;
 	unsigned rx_port_list[APP_MAX_PORTS];
 };
 
-#define MAC_TABLE_SIZE 20
-
+/* Main structure holding application state */
 struct Switch
 {
 	int n_lcores;
@@ -51,33 +52,36 @@ struct Switch
 	int port_mask;
 	int n_ports;
 	int ports[APP_MAX_PORTS];
-
 	int mac_table[MAC_TABLE_SIZE];
 	struct rte_hash *hash;
-    rte_spinlock_t lock;
-    struct lcore_conf lcore_conf[RTE_MAX_LCORE];
+	rte_spinlock_t lock;
+	struct lcore_conf lcore_conf[RTE_MAX_LCORE];
 } app;
 
+/* Ethernet device configuration */
 static struct rte_eth_conf port_conf = {
 	.txmode = {
 		.mq_mode = RTE_ETH_MQ_TX_NONE,
 	},
 };
 
+/* Initialize RX queues for each lcore */
 int init_lcore_rx_queues()
 {
 	uint16_t i, n_rx_queues;
 	uint8_t lcore;
-    if(app.n_lcores != app.n_ports) {
-        rte_panic("n_lcore != n_ports");
-    }
+	if (app.n_lcores != app.n_ports)
+	{
+		rte_panic("n_lcore != n_ports");
+	}
 	for (i = 0; i < app.n_lcores; i++)
 	{
-        int lcore_id = app.lcores[i];
-        app.lcore_conf[lcore_id].rx_port_list[app.lcore_conf[lcore_id].n_ports ++] = i;
+		int lcore_id = app.lcores[i];
+		app.lcore_conf[lcore_id].rx_port_list[app.lcore_conf[lcore_id].n_ports++] = i;
 	}
 }
 
+/* Initialize logical cores for the application */
 static int app_init_lcores()
 {
 	int n_lcore = 0;
@@ -90,8 +94,8 @@ static int app_init_lcores()
 	app.n_lcores = n_lcore;
 }
 
-static int
-app_init_port()
+/* Initialize ports */
+static int app_init_port()
 {
 	int port_id;
 	int ret;
@@ -149,10 +153,11 @@ app_init_port()
 		ret = rte_eth_dev_start(port_id);
 		if (ret < 0)
 			rte_exit(EXIT_FAILURE, "rte_eth_dev_start \n");
-        rte_eth_promiscuous_enable(port_id);
+		rte_eth_promiscuous_enable(port_id);
 	}
 }
 
+/* Initialize the hash table for MAC address learning */
 void app_init_hash()
 {
 	char name[10] = "hash_name";
@@ -166,10 +171,13 @@ void app_init_hash()
 	app.hash = rte_hash_create(&hash_params);
 }
 
-void app_init_lock() {
-    rte_spinlock_init(&app.lock);
+/* Initialize lock for shared data */
+void app_init_lock()
+{
+	rte_spinlock_init(&app.lock);
 }
 
+/* Main initialization function */
 void app_init()
 {
 	// init mempool
@@ -182,14 +190,13 @@ void app_init()
 
 	app_init_lcores();
 	app_init_port();
-    init_lcore_rx_queues();
+	init_lcore_rx_queues();
 	app_init_hash();
-    app_init_lock();
+	app_init_lock();
 }
 
 /* Launch a function on lcore. 8< */
-static int
-lcore_hello(__rte_unused void *arg)
+static int lcore_hello(__rte_unused void *arg)
 {
 	unsigned lcore_id;
 	lcore_id = rte_lcore_id();
@@ -235,7 +242,6 @@ int app_parse_args(int argc, char **argv)
 				printf("invalid port mask \n");
 				return -1;
 			}
-			printf("port_mask = %x\n", app.port_mask);
 			break;
 		default:
 			printf("invalid\n");
@@ -249,10 +255,11 @@ int app_parse_args(int argc, char **argv)
 	return ret;
 }
 
-void print_addr(struct rte_ether_addr *addr) {
-    printf("MAC Address : %02" PRIx8 ":%02" PRIx8 ":%02" PRIx8 ":%02" PRIx8 ":%02" PRIx8 ":%02" PRIx8 "\n",
-           addr->addr_bytes[0], addr->addr_bytes[1], addr->addr_bytes[2],
-           addr->addr_bytes[3], addr->addr_bytes[4], addr->addr_bytes[5]);
+void print_addr(struct rte_ether_addr *addr)
+{
+	printf("MAC Address : %02" PRIx8 ":%02" PRIx8 ":%02" PRIx8 ":%02" PRIx8 ":%02" PRIx8 ":%02" PRIx8 "\n",
+		   addr->addr_bytes[0], addr->addr_bytes[1], addr->addr_bytes[2],
+		   addr->addr_bytes[3], addr->addr_bytes[4], addr->addr_bytes[5]);
 }
 
 int app_l2_lookup(const struct rte_ether_addr *addr)
@@ -265,7 +272,6 @@ int app_l2_lookup(const struct rte_ether_addr *addr)
 	return -1;
 }
 
-
 void l2_learning(struct rte_mbuf *m, int src_port)
 {
 	struct rte_ether_hdr *eth;
@@ -274,14 +280,12 @@ void l2_learning(struct rte_mbuf *m, int src_port)
 	addr = &eth->src_addr;
 	if (app_l2_lookup(addr) >= 0)
 		return;
-    rte_spinlock_lock(&app.lock);
+	rte_spinlock_lock(&app.lock);
 	int index = rte_hash_add_key(app.hash, addr);
-    printf("learning ... port_id = %u\n", src_port);
 	if (index < 0)
 		rte_panic("l2_hash add key error \n");
-    printf("index = %d \n", index);
 	app.mac_table[index] = src_port;
-    rte_spinlock_unlock(&app.lock);
+	rte_spinlock_unlock(&app.lock);
 }
 
 int get_dest_port(struct rte_mbuf *m, int src_port)
@@ -295,13 +299,14 @@ int get_dest_port(struct rte_mbuf *m, int src_port)
 
 #define BURST_SIZE 32
 
+/* Main loop executed by each lcore */
 int app_main_loop(void *)
 {
 	uint32_t lcore_id = rte_lcore_id();
-    struct lcore_conf *conf_ptr = &app.lcore_conf[lcore_id];
-	printf("Lcore %u is forwarding for port %d\n", lcore_id, conf_ptr -> rx_port_list[0]);
+	struct lcore_conf *conf_ptr = &app.lcore_conf[lcore_id];
+	printf("Lcore %u is forwarding for port %d\n", lcore_id, conf_ptr->rx_port_list[0]);
 
-    int port = app.ports[conf_ptr -> rx_port_list[0]];
+	int port = app.ports[conf_ptr->rx_port_list[0]];
 
 	struct rte_mbuf *bufs[BURST_SIZE];
 	struct rte_mbuf *tx_bufs[APP_MAX_PORTS][BURST_SIZE];
@@ -317,18 +322,20 @@ int app_main_loop(void *)
 		{
 			l2_learning(bufs[i], port);
 			int dst_port = get_dest_port(bufs[i], port);
-            if(dst_port == -1) {
-                // broadcast 
-                for(int j = 0; j < app.n_ports; j ++) {
-                    if(j != (port ^ 1) && j != port)
-                    {
-			            tx_bufs[j][n_tx_bufs[j]++] = rte_pktmbuf_clone(bufs[i], app.pool);
-                    }
-                }
-			    tx_bufs[port ^ 1][n_tx_bufs[port ^ 1]++] = bufs[i];
-            }
-            else 
-			    tx_bufs[dst_port][n_tx_bufs[dst_port]++] = bufs[i];
+			if (dst_port == -1)
+			{
+				// broadcast
+				for (int j = 0; j < app.n_ports; j++)
+				{
+					if (j != (port ^ 1) && j != port)
+					{
+						tx_bufs[j][n_tx_bufs[j]++] = rte_pktmbuf_clone(bufs[i], app.pool);
+					}
+				}
+				tx_bufs[port ^ 1][n_tx_bufs[port ^ 1]++] = bufs[i];
+			}
+			else
+				tx_bufs[dst_port][n_tx_bufs[dst_port]++] = bufs[i];
 		}
 		for (int i = 0; i < app.n_ports; i++)
 		{
@@ -340,12 +347,13 @@ int app_main_loop(void *)
 				for (int j = nb_tx; j < n_tx_bufs[i]; j++)
 					rte_pktmbuf_free(tx_bufs[i][j]);
 			}
-            n_tx_bufs[i] = 0;
+			n_tx_bufs[i] = 0;
 		}
 	}
 	return 0;
 }
 
+/* Clean up and shut down ports */
 void app_finish()
 {
 	int ret;
