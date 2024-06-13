@@ -24,6 +24,7 @@
 #include <rte_ethdev.h>
 #include <rte_hash.h>
 #include <rte_hash_crc.h>
+#include <rte_spinlock.h>
 
 #define APP_MAX_LCORES 16
 #define APP_MAX_PORTS 16
@@ -54,6 +55,7 @@ struct Switch
 
 	int mac_table[MAC_TABLE_SIZE];
 	struct rte_hash *hash;
+    rte_spinlock_t lock;
 } app;
 
 static struct rte_eth_conf port_conf = {
@@ -159,6 +161,10 @@ void app_init_hash()
 	app.hash = rte_hash_create(&hash_params);
 }
 
+void app_init_lock() {
+    rte_spinlock_init(&app.lock);
+}
+
 void app_init()
 {
 	// init mempool
@@ -172,6 +178,7 @@ void app_init()
 	app_init_lcores();
 	app_init_port();
 	app_init_hash();
+    app_init_lock();
 }
 
 /* Launch a function on lcore. 8< */
@@ -261,12 +268,14 @@ void l2_learning(struct rte_mbuf *m, int src_port)
 	addr = &eth->src_addr;
 	if (app_l2_lookup(addr) >= 0)
 		return;
+    rte_spinlock_lock(&app.lock);
 	int index = rte_hash_add_key(app.hash, addr);
     printf("learning ... port_id = %u\n", src_port);
 	if (index < 0)
 		rte_panic("l2_hash add key error \n");
     printf("index = %d \n", index);
 	app.mac_table[index] = src_port;
+    rte_spinlock_unlock(&app.lock);
 }
 
 int get_dest_port(struct rte_mbuf *m, int src_port)
